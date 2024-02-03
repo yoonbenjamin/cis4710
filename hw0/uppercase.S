@@ -25,6 +25,9 @@ _start:
                 sub a2, a2, a2  
                 beq a1, a2, end_program  # Branch to the end of the program if string ended
 
+                # Copy a1 to a4 before modifying it
+                mv a4, a1
+
                 # Check if this a letter and if it's lowercase
                 li a3, 97  # Load ASCII value for 'a'
                 blt a1, a3, no_conversion  # Branch if no coversion is necessary (not a lowercase letter)
@@ -32,7 +35,7 @@ _start:
                 bge a1, a3, no_conversion  # Branch if no conversion is necessary (not a lowercase letter)
 
                 # Convert to uppercase letter
-                addi a1, a1, -32
+                addi a1, a4, -32
 
         no_conversion:
                 # Store letter in a1 register
