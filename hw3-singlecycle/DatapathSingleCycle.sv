@@ -25,6 +25,22 @@ module RegFile (
   logic [`REG_SIZE] regs[NumRegs];
 
   // TODO: your code here
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      for (int idx = 0; idx < NumRegs; idx++) begin
+        regs[idx] <= 0;
+      end
+    end else if (we && rd != 0) begin
+      // Write data
+      regs[rd] <= rd_data;
+    end
+  end
+
+  // Read data
+  always_comb begin
+    rs1_data = (rs1 == 0) ? 0 : regs[rs1];
+    rs2_data = (rs2 == 0) ? 0 : regs[rs2];
+  end
 
 endmodule
 
@@ -188,12 +204,258 @@ module DatapathSingleCycle (
 
   logic illegal_insn;
 
+  // Declare signals as logic
+  logic [`REG_SIZE] rd_data; // Data to write
+  logic we; // Write enable
+  logic [`REG_SIZE] rs1_data, rs2_data; // Data from source
+
+  // Instantiate RegFile w/ instance name 'rf'
+  RegFile rf (
+    .rd(insn_rd),
+    .rd_data(rd_data),
+    .rs1(insn_rs1),
+    .rs1_data(rs1_data),
+    .rs2(insn_rs2),
+    .rs2_data(rs2_data),
+    .clk(clk),
+    .we(we),
+    .rst(rst)
+  );
+
+  // Declare signals for CLA adder
+  logic [31:0] a, b, sum;
+  logic cin;
+
+  // Instantiate CLA adder
+  cla adder (
+    .a(a),
+    .b(b),
+    .cin(cin),
+    .sum(sum)
+  );
+
+  always @(posedge clk) begin
+    if (rst) begin
+        pcCurrent <= 32'd0; // Reset condition
+    end else begin
+        pcCurrent <= pcNext; // Default next PC value
+    end
+  end
+
   always_comb begin
     illegal_insn = 1'b0;
+
+    // Default assignments
+    we = 1'b0; 
+    rd_data = 32'b0; 
+    a = 32'b0;
+    b = 32'b0;
+    cin = 1'b0;
+    pcNext = pcCurrent + 4;
+    halt = 1'b0;
 
     case (insn_opcode)
       OpLui: begin
         // TODO: start here by implementing lui
+        rd_data = {insn_from_imem[31:12], 12'b0}; // Immediate is in top 20 bits
+        we = 1'b1; // Enable writing
+      end
+      OpRegImm: begin
+        case (insn_funct3)
+          3'b000: begin
+            // ADDI:
+            a = rs1_data; // Src reg data
+            b = imm_i_sext; // Sign-extended immediate
+            rd_data = sum; // Result of addition
+            we = 1'b1; // Enable write
+          end
+          3'b010: begin
+            // SLTI:
+            rd_data = $signed(rs1_data) < $signed(imm_i_sext) ? 32'd1 : 32'd0;
+            we = 1'b1; // Enable write back to reg
+          end
+          3'b011: begin
+            // SLTIU:
+            rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'd1 : 32'd0;
+            we = 1'b1; // Enable writing
+          end
+          3'b100: begin
+            // XORI:
+            rd_data = rs1_data ^ imm_i_sext; // Perform bitwise XOR
+            we = 1'b1; // Enable write back to reg
+          end
+          3'b110: begin
+            // ORI:
+            rd_data = rs1_data | imm_i_sext; 
+            we = 1'b1; // Enable write back to reg
+          end
+          3'b111: begin
+            // ANDI:
+            rd_data = rs1_data & imm_i_sext; // Perform bitwise AND
+            we = 1'b1; // Enable writing to dest reg
+          end
+          3'b001: begin
+            if (insn_from_imem[31:25] == 7'b0000000) begin 
+              // SLLI:
+              rd_data = rs1_data << imm_i[4:0]; // Shift left logical
+              we = 1'b1; // Enable writing to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b101: begin // funct3 for SRLI and SRAI
+            if (insn_from_imem[31:25] == 7'b0000000) begin
+              // SRLI:
+              rd_data = rs1_data >> imm_i[4:0]; // Shift rs1_data right
+              we = 1'b1; // Enable write back to dest reg
+            end else if (insn_from_imem[31:25] == 7'b0100000) begin
+              // SRAI:
+              rd_data = $signed(rs1_data) >>> imm_i[4:0];
+              we = 1'b1; // Enable writing to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          default: illegal_insn = 1'b1;
+        endcase
+      end
+      OpRegReg: begin // This indicates R-type insn
+        case (insn_funct3)
+          3'b000: begin // funct3 for add, sub
+            a = rs1_data; // Data from src reg 1
+            b = rs2_data; // Data from src reg 2
+            if (insn_funct7 == 7'b0000000) begin
+              // ADD:
+              cin = 1'b0; // Carry-in for add
+            end else if (insn_funct7 == 7'b0100000) begin
+              // SUB:
+              b = ~rs2_data; // Invert bits of 2nd operand for sub
+              cin = 1'b1; // Carry-in for sub
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+            // Result directly stored in sum
+            rd_data = sum;
+            we = 1'b1; // Enable write back to reg 
+          end
+          3'b111: begin // funct3 for AND
+            if (insn_funct7 == 7'b0000000) begin
+              // AND:
+              rd_data = rs1_data & rs2_data; // Perform bitwise AND
+              we = 1'b1; // Enable write back to reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b001: begin
+            if (insn_funct7 == 7'b0000000) begin
+              // SLL:
+              rd_data = rs1_data << rs2_data[4:0]; // Shift left
+              we = 1'b1; // Enable write back to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b010: begin
+            if (insn_funct7 == 7'b0000000) begin
+              // SLT:
+              rd_data = $signed(rs1_data) < $signed(rs2_data) ? 32'd1 : 32'd0;
+              we = 1'b1; // Enable write back to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b011: begin
+            if (insn_funct7 == 7'b0000000) begin
+              // SLTU:
+              rd_data = ($unsigned(rs1_data) < $unsigned(rs2_data)) ? 32'd1 : 32'd0;
+              we = 1'b1; // Enable write back to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b100: begin
+            // XOR:
+            if (insn_funct7 == 7'b0000000) begin
+              rd_data = rs1_data ^ rs2_data; // Perform bitwise XOR
+              we = 1'b1; // Enable write back to dest reg
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b101: begin // funct3 for SRL and SRA
+            if (insn_funct7 == 7'b0000000) begin
+              // SRL:
+              rd_data = rs1_data >> rs2_data[4:0]; // Logical shift right
+              we = 1'b1; // Enable write back to dest reg
+            end else if (insn_funct7 == 7'b0100000) begin
+              // SRA:
+              rd_data = $signed(rs1_data) >>> rs2_data[4:0];
+              we = 1'b1;
+            end else begin
+              illegal_insn = 1'b1; // Mark as illegal
+            end
+          end
+          3'b110: begin
+            if (insn_funct7 == 7'b0000000) begin
+              // OR:
+              rd_data = rs1_data | rs2_data;
+              we = 1'b1; // Enable write back to dest reg
+            end else begin
+              illegal_insn = 1'b1;
+            end
+          end
+          default: illegal_insn = 1'b1;
+        endcase
+      end
+      OpBranch: begin
+        case (insn_funct3)
+          3'b000: begin
+            // BEQ:
+            if (rs1_data == rs2_data) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          3'b111: begin
+            // BGEU:
+            if ($unsigned(rs1_data) >= $unsigned(rs2_data)) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          3'b001: begin
+            // BNE:
+            if (rs1_data != rs2_data) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          3'b100: begin
+            // BLT:
+            if ($signed(rs1_data) < $signed(rs2_data)) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          3'b101: begin
+            // BGE:
+            if ($signed(rs1_data) >= $signed(rs2_data)) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          3'b110: begin
+            // BLTU:
+            if ($unsigned(rs1_data) < $unsigned(rs2_data)) begin
+              pcNext = pcCurrent + imm_b_sext;
+            end
+          end
+          default: illegal_insn = 1'b1;
+        endcase
+      end
+      OpEnviron: begin
+        if (insn_from_imem[31:7] == 25'd0) begin
+          // ECALL:
+          halt = 1'b1; // Set halt to 1
+        end else begin
+          illegal_insn = 1'b1; // Mark as illegal
+        end
       end
       default: begin
         illegal_insn = 1'b1;
