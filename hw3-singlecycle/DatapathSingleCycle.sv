@@ -242,6 +242,34 @@ module DatapathSingleCycle (
     end
   end
 
+  logic [31:0] o_quotient, o_remainder;
+  logic [31:0] i_dividend, i_divisor;
+
+  divider_unsigned divider (
+    .i_dividend(i_dividend),
+    .i_divisor(i_divisor),
+    .o_remainder(o_remainder),
+    .o_quotient(o_quotient)
+  );
+
+  logic [31:0] abs_dividend, abs_divisor;
+  logic neg_dividend, neg_divisor, neg_result;
+
+  // if inputs negative
+  always_comb begin
+    neg_dividend = rs1_data[31];
+    neg_divisor = rs2_data[31];
+
+    // compute absolute values
+    abs_dividend = neg_dividend ? (~rs1_data + 1) : rs1_data;
+    abs_divisor = neg_divisor ? (~rs2_data + 1) : rs2_data;
+
+    // if result should be negative
+    neg_result = neg_dividend ^ neg_divisor;
+  end
+
+  logic [63:0] mul_ext; // 64-bit variable to store multiplication reuslt
+
   always_comb begin
     illegal_insn = 1'b0;
 
@@ -253,6 +281,10 @@ module DatapathSingleCycle (
     cin = 1'b0;
     pcNext = pcCurrent + 4;
     halt = 1'b0;
+    i_dividend = rs1_data;
+    i_divisor = rs2_data;
+    mul_ext = 64'b0;
+    addr_to_dmem = 32'b0; 
 
     case (insn_opcode)
       OpLui: begin
@@ -261,200 +293,233 @@ module DatapathSingleCycle (
         we = 1'b1; // Enable writing
       end
       OpRegImm: begin
-        case (insn_funct3)
-          3'b000: begin
-            // ADDI:
-            a = rs1_data; // Src reg data
-            b = imm_i_sext; // Sign-extended immediate
-            rd_data = sum; // Result of addition
-            we = 1'b1; // Enable write
-          end
-          3'b010: begin
-            // SLTI:
-            rd_data = $signed(rs1_data) < $signed(imm_i_sext) ? 32'd1 : 32'd0;
-            we = 1'b1; // Enable write back to reg
-          end
-          3'b011: begin
-            // SLTIU:
-            rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'd1 : 32'd0;
-            we = 1'b1; // Enable writing
-          end
-          3'b100: begin
-            // XORI:
-            rd_data = rs1_data ^ imm_i_sext; // Perform bitwise XOR
-            we = 1'b1; // Enable write back to reg
-          end
-          3'b110: begin
-            // ORI:
-            rd_data = rs1_data | imm_i_sext; 
-            we = 1'b1; // Enable write back to reg
-          end
-          3'b111: begin
-            // ANDI:
-            rd_data = rs1_data & imm_i_sext; // Perform bitwise AND
-            we = 1'b1; // Enable writing to dest reg
-          end
-          3'b001: begin
-            if (insn_from_imem[31:25] == 7'b0000000) begin 
-              // SLLI:
-              rd_data = rs1_data << imm_i[4:0]; // Shift left logical
-              we = 1'b1; // Enable writing to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b101: begin // funct3 for SRLI and SRAI
-            if (insn_from_imem[31:25] == 7'b0000000) begin
-              // SRLI:
-              rd_data = rs1_data >> imm_i[4:0]; // Shift rs1_data right
-              we = 1'b1; // Enable write back to dest reg
-            end else if (insn_from_imem[31:25] == 7'b0100000) begin
-              // SRAI:
-              rd_data = $signed(rs1_data) >>> imm_i[4:0];
-              we = 1'b1; // Enable writing to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          default: illegal_insn = 1'b1;
-        endcase
+        if (insn_addi) begin
+          // ADDI:
+          a = rs1_data; // Src reg data
+          b = imm_i_sext; // Sign-extended immediate
+          rd_data = sum; // Result of addition
+          we = 1'b1; // Enable write
+        end else if (insn_slti) begin
+          // SLTI:
+          rd_data = $signed(rs1_data) < $signed(imm_i_sext) ? 32'd1 : 32'd0;
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_sltiu) begin
+          // SLTIU:
+          rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'd1 : 32'd0;
+          we = 1'b1; // Enable writing
+        end else if (insn_xori) begin
+          // XORI:
+          rd_data = rs1_data ^ imm_i_sext; // Perform bitwise XOR
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_ori) begin
+          // ORI:
+          rd_data = rs1_data | imm_i_sext; 
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_andi) begin
+          // ANDI:
+          rd_data = rs1_data & imm_i_sext; // Perform bitwise AND
+          we = 1'b1; // Enable writing to dest reg
+        end else if (insn_slli) begin
+          // SLLI:
+          rd_data = rs1_data << imm_i[4:0]; // Shift left logical
+          we = 1'b1; // Enable writing to dest reg
+        end else if (insn_srli) begin
+          // SRLI:
+          rd_data = rs1_data >> imm_i[4:0]; // Shift rs1_data right
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_srai) begin
+          // SRAI:
+          rd_data = $signed(rs1_data) >>> imm_i[4:0];
+          we = 1'b1; // Enable writing to dest reg
+        end else begin
+          illegal_insn = 1'b1;
+        end
       end
       OpRegReg: begin // This indicates R-type insn
-        case (insn_funct3)
-          3'b000: begin // funct3 for add, sub
-            a = rs1_data; // Data from src reg 1
-            b = rs2_data; // Data from src reg 2
-            if (insn_funct7 == 7'b0000000) begin
-              // ADD:
-              cin = 1'b0; // Carry-in for add
-            end else if (insn_funct7 == 7'b0100000) begin
-              // SUB:
-              b = ~rs2_data; // Invert bits of 2nd operand for sub
-              cin = 1'b1; // Carry-in for sub
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-            // Result directly stored in sum
-            rd_data = sum;
-            we = 1'b1; // Enable write back to reg 
-          end
-          3'b111: begin // funct3 for AND
-            if (insn_funct7 == 7'b0000000) begin
-              // AND:
-              rd_data = rs1_data & rs2_data; // Perform bitwise AND
-              we = 1'b1; // Enable write back to reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b001: begin
-            if (insn_funct7 == 7'b0000000) begin
-              // SLL:
-              rd_data = rs1_data << rs2_data[4:0]; // Shift left
-              we = 1'b1; // Enable write back to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b010: begin
-            if (insn_funct7 == 7'b0000000) begin
-              // SLT:
-              rd_data = $signed(rs1_data) < $signed(rs2_data) ? 32'd1 : 32'd0;
-              we = 1'b1; // Enable write back to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b011: begin
-            if (insn_funct7 == 7'b0000000) begin
-              // SLTU:
-              rd_data = ($unsigned(rs1_data) < $unsigned(rs2_data)) ? 32'd1 : 32'd0;
-              we = 1'b1; // Enable write back to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b100: begin
-            // XOR:
-            if (insn_funct7 == 7'b0000000) begin
-              rd_data = rs1_data ^ rs2_data; // Perform bitwise XOR
-              we = 1'b1; // Enable write back to dest reg
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b101: begin // funct3 for SRL and SRA
-            if (insn_funct7 == 7'b0000000) begin
-              // SRL:
-              rd_data = rs1_data >> rs2_data[4:0]; // Logical shift right
-              we = 1'b1; // Enable write back to dest reg
-            end else if (insn_funct7 == 7'b0100000) begin
-              // SRA:
-              rd_data = $signed(rs1_data) >>> rs2_data[4:0];
-              we = 1'b1;
-            end else begin
-              illegal_insn = 1'b1; // Mark as illegal
-            end
-          end
-          3'b110: begin
-            if (insn_funct7 == 7'b0000000) begin
-              // OR:
-              rd_data = rs1_data | rs2_data;
-              we = 1'b1; // Enable write back to dest reg
-            end else begin
-              illegal_insn = 1'b1;
-            end
-          end
-          default: illegal_insn = 1'b1;
-        endcase
+        if (insn_add) begin
+          // ADD:
+          a = rs1_data; // Data from src reg 1
+          b = rs2_data; // Data from src reg 2
+          cin = 1'b0; // Carry-in for add
+          // result stored in sum
+          rd_data = sum;
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_sub) begin
+          // SUB:
+          a = rs1_data; // Data from src reg 1
+          b = rs2_data; // Data from src reg 2
+          b = ~rs2_data; // Invert bits of 2nd operand for sub
+          cin = 1'b1; // Carry-in for sub
+          // result stored in sum
+          rd_data = sum;
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_mul) begin
+          // MUL:
+          rd_data = rs1_data * rs2_data;
+          we = 1'b1;
+        end else if (insn_and) begin
+          // AND:
+          rd_data = rs1_data & rs2_data; // Perform bitwise AND
+          we = 1'b1; // Enable write back to reg
+        end else if (insn_remu) begin
+          // REMU:
+          rd_data = o_remainder; // use remainder
+          we = 1'b1;
+        end else if (insn_sll) begin
+          // SLL:
+          rd_data = rs1_data << rs2_data[4:0]; // Shift left
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_mulh) begin
+          // MULH:
+          mul_ext = ($signed(rs1_data) * $signed(rs2_data));
+          rd_data = mul_ext[63:32];
+          we = 1'b1;
+        end else if (insn_slt) begin
+          // SLT:
+          rd_data = $signed(rs1_data) < $signed(rs2_data) ? 32'd1 : 32'd0;
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_mulhsu) begin
+          // MULHSU:
+          mul_ext = ($signed(rs1_data) * $unsigned(rs2_data));
+          rd_data = mul_ext[63:32];
+          we = 1'b1;
+        end else if (insn_sltu) begin
+          // SLTU:
+          rd_data = ($unsigned(rs1_data) < $unsigned(rs2_data)) ? 32'd1 : 32'd0;
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_mulhu) begin
+          // MULHU:
+          mul_ext = ($unsigned(rs1_data) * $unsigned(rs2_data));
+          rd_data = mul_ext[63:32];
+          we = 1'b1;
+        end else if (insn_xor) begin
+          // XOR:
+          rd_data = rs1_data ^ rs2_data; // Perform bitwise XOR
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_div) begin
+          // DIV:
+          i_dividend = abs_dividend;
+          i_divisor = abs_divisor;
+          // adjust sign
+          rd_data = neg_result ? (~o_quotient + 1) : o_quotient;
+          we = 1'b1;
+        end else if (insn_srl) begin
+          // SRL:
+          rd_data = rs1_data >> rs2_data[4:0]; // Logical shift right
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_sra) begin
+          // SRA:
+          rd_data = $signed(rs1_data) >>> rs2_data[4:0];
+          we = 1'b1;
+        end else if (insn_divu) begin
+          // DIVU:
+          rd_data = o_quotient; // use quotient
+          we = 1'b1;
+        end if (insn_or) begin
+          // OR:
+          rd_data = rs1_data | rs2_data;
+          we = 1'b1; // Enable write back to dest reg
+        end else if (insn_rem) begin
+          // REM:
+          i_dividend = abs_dividend;
+          i_divisor = abs_divisor;
+          // adjust sign
+          rd_data = neg_dividend ? (~o_remainder + 1) : o_remainder;
+          we = 1'b1;
+        end else begin
+          illegal_insn = 1'b1;
+        end
       end
       OpBranch: begin
-        case (insn_funct3)
-          3'b000: begin
-            // BEQ:
-            if (rs1_data == rs2_data) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        if (insn_beq) begin
+          // BEQ:
+          if (rs1_data == rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          3'b111: begin
-            // BGEU:
-            if ($unsigned(rs1_data) >= $unsigned(rs2_data)) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        end else if (insn_bgeu) begin
+          // BGEU:
+          if ($unsigned(rs1_data) >= $unsigned(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          3'b001: begin
-            // BNE:
-            if (rs1_data != rs2_data) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        end else if (insn_bne) begin
+          // BNE:
+          if (rs1_data != rs2_data) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          3'b100: begin
-            // BLT:
-            if ($signed(rs1_data) < $signed(rs2_data)) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        end else if (insn_blt) begin
+          // BLT:
+          if ($signed(rs1_data) < $signed(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          3'b101: begin
-            // BGE:
-            if ($signed(rs1_data) >= $signed(rs2_data)) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        end else if (insn_bge) begin
+          // BGE:
+          if ($signed(rs1_data) >= $signed(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          3'b110: begin
-            // BLTU:
-            if ($unsigned(rs1_data) < $unsigned(rs2_data)) begin
-              pcNext = pcCurrent + imm_b_sext;
-            end
+        end else if (insn_bltu) begin
+          // BLTU:
+          if ($unsigned(rs1_data) < $unsigned(rs2_data)) begin
+            pcNext = pcCurrent + imm_b_sext;
           end
-          default: illegal_insn = 1'b1;
-        endcase
+        end else begin 
+          illegal_insn = 1'b1;
+        end
       end
       OpEnviron: begin
-        if (insn_from_imem[31:7] == 25'd0) begin
+        if (insn_ecall) begin
           // ECALL:
           halt = 1'b1; // Set halt to 1
         end else begin
           illegal_insn = 1'b1; // Mark as illegal
+        end
+      end
+      OpMiscMem: begin
+        if (insn_fence) begin
+        end
+      end
+      OpJal: begin
+        // JAL:
+        rd_data = pcCurrent + 4; // save return address
+        pcNext = pcCurrent + imm_j_sext;
+        we = 1'b1; // write enable
+      end
+      OpJalr: begin
+        // JALR:
+        rd_data = pcCurrent + 4; // save return address
+        pcNext = (rs1_data + imm_i_sext) & 32'hfffffffe;
+        we = 1'b1; // write enable
+      end
+      OpAuipc: begin
+        // AUPIC:
+        rd_data = pcCurrent + (imm_i_sext << 12);
+        we = 1'b1; // enable writing
+      end
+      OpLoad: begin
+        if (insn_lb) begin 
+          // LB:
+          // Calculate effective address
+          addr_to_dmem = rs1_data + imm_i_sext;
+
+          // Extract the relevant byte based on the effective address
+          // Perform sign extension
+          case (addr_to_dmem[1:0])
+              2'b00: rd_data = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
+              2'b01: rd_data = {{24{load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
+              2'b10: rd_data = {{24{load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
+              2'b11: rd_data = {{24{load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
+          endcase
+
+          we = 1'b1; // Enable writing back to the register
+        end else if (insn_lh) begin 
+          // LH:
+        end else if (insn_lw) begin 
+          // LW:
+        end else if (insn_lbu) begin 
+          // LBU:
+        end else if (insn_lhu) begin
+          // LHU:
+        end else begin
+          illegal_insn = 1'b1;
         end
       end
       default: begin
