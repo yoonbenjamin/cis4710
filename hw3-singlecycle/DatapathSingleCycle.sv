@@ -284,7 +284,6 @@ module DatapathSingleCycle (
     i_dividend = rs1_data;
     i_divisor = rs2_data;
     mul_ext = 64'b0;
-    addr_to_dmem = 32'b0; 
 
     case (insn_opcode)
       OpLui: begin
@@ -497,19 +496,6 @@ module DatapathSingleCycle (
       OpLoad: begin
         if (insn_lb) begin 
           // LB:
-          // Calculate effective address
-          addr_to_dmem = rs1_data + imm_i_sext;
-
-          // Extract the relevant byte based on the effective address
-          // Perform sign extension
-          case (addr_to_dmem[1:0])
-              2'b00: rd_data = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
-              2'b01: rd_data = {{24{load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
-              2'b10: rd_data = {{24{load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
-              2'b11: rd_data = {{24{load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
-          endcase
-
-          we = 1'b1; // Enable writing back to the register
         end else if (insn_lh) begin 
           // LH:
         end else if (insn_lw) begin 
