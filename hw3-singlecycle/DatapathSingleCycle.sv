@@ -273,6 +273,10 @@ module DatapathSingleCycle (
   // unadjusted exact address
   logic [31:0] exact_addr_dmem;
 
+  logic [`REG_SIZE] my_store_data_to_dmem_logic;
+
+  assign store_data_to_dmem = my_store_data_to_dmem_logic;
+
   always_comb begin
     illegal_insn = 1'b0;
 
@@ -603,19 +607,19 @@ module DatapathSingleCycle (
           // select byte & set corresponding byte enable bit
           case (exact_addr_dmem[1:0])
             2'b00: begin
-              store_data_to_dmem = {24'b0, rs2_data[7:0]}; // prepare byte 0
+              my_store_data_to_dmem_logic = {24'b0, rs2_data[7:0]}; // prepare byte 0
               store_we_to_dmem = 4'b0001;
             end
             2'b01: begin
-              store_data_to_dmem = {16'b0, rs2_data[7:0], 8'b0}; // prepare byte 1
+              my_store_data_to_dmem_logic = {16'b0, rs2_data[7:0], 8'b0}; // prepare byte 1
               store_we_to_dmem = 4'b0010;
             end
             2'b10: begin
-              store_data_to_dmem = {8'b0, rs2_data[7:0], 16'b0}; // prepare byte 2
+              my_store_data_to_dmem_logic = {8'b0, rs2_data[7:0], 16'b0}; // prepare byte 2
               store_we_to_dmem = 4'b0100;
             end
             2'b11: begin
-              store_data_to_dmem = {rs2_data[7:0], 24'b0}; // prepare byte 3
+              my_store_data_to_dmem_logic = {rs2_data[7:0], 24'b0}; // prepare byte 3
               store_we_to_dmem = 4'b1000;
             end
             default: illegal_insn = 1'b1; // should never happen
@@ -631,11 +635,11 @@ module DatapathSingleCycle (
           // select half-word & set corresponding byte enable bit
           case (exact_addr_dmem[1:0])
             2'b00: begin
-              store_data_to_dmem = {16'b0, rs2_data[15:0]}; // lower half-word
+              my_store_data_to_dmem_logic = {16'b0, rs2_data[15:0]}; // lower half-word
               store_we_to_dmem = 4'b0011; // enable writing
             end
             2'b10: begin
-              store_data_to_dmem = {rs2_data[15:0], 16'b0}; // upper half-word
+              my_store_data_to_dmem_logic = {rs2_data[15:0], 16'b0}; // upper half-word
               store_we_to_dmem = 4'b1100; // enable writing
             end
             default: illegal_insn = 1'b1; // should never happen
@@ -651,7 +655,7 @@ module DatapathSingleCycle (
           end else begin
             addr_to_dmem = rs1_data + imm_s_sext;
             // store entire word
-            store_data_to_dmem = rs2_data;
+            my_store_data_to_dmem_logic = rs2_data;
             // enable writing
             store_we_to_dmem = 4'b1111;
           end
