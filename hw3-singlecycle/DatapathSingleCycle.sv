@@ -268,7 +268,7 @@ module DatapathSingleCycle (
     neg_result = neg_dividend ^ neg_divisor;
   end
 
-  logic [63:0] mul_ext; // 64-bit variable to store multiplication reuslt
+  logic [63:0] mul1_ext, mul2_ext; // 64-bit variables to store multiplication reuslt
 
   // unadjusted exact address
   logic [31:0] exact_addr_dmem;
@@ -286,7 +286,6 @@ module DatapathSingleCycle (
     halt = 1'b0;
     i_dividend = rs1_data;
     i_divisor = rs2_data;
-    mul_ext = 64'b0;
     addr_to_dmem = 32'b0; 
 
     case (insn_opcode)
@@ -374,8 +373,8 @@ module DatapathSingleCycle (
           we = 1'b1; // Enable write back to dest reg
         end else if (insn_mulh) begin
           // MULH:
-          mul_ext = ($signed(rs1_data) * $signed(rs2_data));
-          rd_data = mul_ext[63:32];
+          mul1_ext = ($signed(rs1_data) * $signed(rs2_data));
+          rd_data = mul1_ext[63:32];
           we = 1'b1;
         end else if (insn_slt) begin
           // SLT:
@@ -383,8 +382,10 @@ module DatapathSingleCycle (
           we = 1'b1; // Enable write back to dest reg
         end else if (insn_mulhsu) begin
           // MULHSU:
-          mul_ext = ($signed(rs1_data) * $unsigned(rs2_data));
-          rd_data = mul_ext[63:32];
+          mul2_ext = {{32{rs1_data[31]}}, rs1_data};
+          mul1_ext = mul2_ext * {{32'b0}, rs2_data};
+          //mul1_ext = ($signed(rs1_data) * $unsigned(rs2_data));
+          rd_data = mul1_ext[63:32];
           we = 1'b1;
         end else if (insn_sltu) begin
           // SLTU:
@@ -392,8 +393,8 @@ module DatapathSingleCycle (
           we = 1'b1; // Enable write back to dest reg
         end else if (insn_mulhu) begin
           // MULHU:
-          mul_ext = ($unsigned(rs1_data) * $unsigned(rs2_data));
-          rd_data = mul_ext[63:32];
+          mul1_ext = ($unsigned(rs1_data) * $unsigned(rs2_data));
+          rd_data = mul1_ext[63:32];
           we = 1'b1;
         end else if (insn_xor) begin
           // XOR:
@@ -401,11 +402,17 @@ module DatapathSingleCycle (
           we = 1'b1; // Enable write back to dest reg
         end else if (insn_div) begin
           // DIV:
-          i_dividend = abs_dividend;
-          i_divisor = abs_divisor;
-          // adjust sign
-          rd_data = neg_result ? (~o_quotient + 1) : o_quotient;
-          we = 1'b1;
+          if (rs2_data == 0) begin
+            // division by zero, quotient all ones
+            rd_data = {32{1'b1}}; // max value
+          end else begin
+            // normal division case
+            i_dividend = abs_dividend;
+            i_divisor = abs_divisor;
+            // adjust sign for result
+            rd_data = neg_result ? (~o_quotient + 1) : o_quotient;
+          end
+          we = 1'b1; // enable writing
         end else if (insn_srl) begin
           // SRL:
           rd_data = rs1_data >> rs2_data[4:0]; // Logical shift right
