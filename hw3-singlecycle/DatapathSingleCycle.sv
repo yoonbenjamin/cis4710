@@ -557,7 +557,6 @@ module DatapathSingleCycle (
           // LBU:
           exact_addr_dmem = rs1_data + imm_i_sext; // calculate address
 
-          // addr_to_dmem = {exact_addr_dmem[31:2], 2'b00}; // align address to 4B boundary
           addr_to_dmem = rs1_data + imm_i_sext;
           addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
 
