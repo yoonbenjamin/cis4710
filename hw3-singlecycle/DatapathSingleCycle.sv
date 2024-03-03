@@ -273,9 +273,13 @@ module DatapathSingleCycle (
   // unadjusted exact address
   logic [31:0] exact_addr_dmem;
 
-  logic [`REG_SIZE] my_store_data_to_dmem_logic;
+  logic [`REG_SIZE] my_store_data_to_dmem_logic, my_addr_to_dmem_logic;
+  logic [3:0] my_store_we_to_dmem_logic;
 
   assign store_data_to_dmem = my_store_data_to_dmem_logic;
+  assign store_we_to_dmem = my_store_we_to_dmem_logic;
+  assign addr_to_dmem = my_addr_to_dmem_logic;
+
 
   always_comb begin
     illegal_insn = 1'b0;
@@ -290,7 +294,9 @@ module DatapathSingleCycle (
     halt = 1'b0;
     i_dividend = rs1_data;
     i_divisor = rs2_data;
-    addr_to_dmem = 32'b0; 
+    my_store_data_to_dmem_logic = 32'b0;
+    my_store_we_to_dmem_logic = 4'b0;
+    my_addr_to_dmem_logic = 32'b0; 
 
     case (insn_opcode)
       OpLui: begin
@@ -513,8 +519,8 @@ module DatapathSingleCycle (
           // LB:
           exact_addr_dmem = rs1_data + imm_i_sext; // calculate address
 
-          addr_to_dmem = rs1_data + imm_i_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_i_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
 
           // fetch 32-bit word
           case (exact_addr_dmem[1:0])
@@ -531,8 +537,8 @@ module DatapathSingleCycle (
           // LH:
           exact_addr_dmem = rs1_data + imm_i_sext; // calculate address
 
-          addr_to_dmem = rs1_data + imm_i_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_i_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
 
           // fetch 32-bit word
           case (exact_addr_dmem[1:0])
@@ -551,7 +557,7 @@ module DatapathSingleCycle (
           if (exact_addr_dmem[1:0] != 2'b00) begin
             illegal_insn = 1'b1; // misaligned
           end else begin
-            addr_to_dmem = rs1_data + imm_i_sext;
+            my_addr_to_dmem_logic = rs1_data + imm_i_sext;
             rd_data = load_data_from_dmem; // directly write loaded data
 
             // enable writing back
@@ -561,8 +567,8 @@ module DatapathSingleCycle (
           // LBU:
           exact_addr_dmem = rs1_data + imm_i_sext; // calculate address
 
-          addr_to_dmem = rs1_data + imm_i_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_i_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
 
           // fetch 32-bit word
           case(exact_addr_dmem[1:0])
@@ -579,8 +585,8 @@ module DatapathSingleCycle (
           // LHU:
           exact_addr_dmem = rs1_data + imm_i_sext; // calculate address
 
-          addr_to_dmem = rs1_data + imm_i_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_i_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
 
           // fetch 32-bit word
           case(exact_addr_dmem[1:0])
@@ -601,26 +607,26 @@ module DatapathSingleCycle (
           exact_addr_dmem = rs1_data + imm_s_sext; // calculate address
           
           // prepare store_data_to_dmem & align addr_to_dmem
-          addr_to_dmem = rs1_data + imm_s_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_s_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
           
           // select byte & set corresponding byte enable bit
           case (exact_addr_dmem[1:0])
             2'b00: begin
               my_store_data_to_dmem_logic = {24'b0, rs2_data[7:0]}; // prepare byte 0
-              store_we_to_dmem = 4'b0001;
+              my_store_we_to_dmem_logic = 4'b0001;
             end
             2'b01: begin
               my_store_data_to_dmem_logic = {16'b0, rs2_data[7:0], 8'b0}; // prepare byte 1
-              store_we_to_dmem = 4'b0010;
+              my_store_we_to_dmem_logic = 4'b0010;
             end
             2'b10: begin
               my_store_data_to_dmem_logic = {8'b0, rs2_data[7:0], 16'b0}; // prepare byte 2
-              store_we_to_dmem = 4'b0100;
+              my_store_we_to_dmem_logic = 4'b0100;
             end
             2'b11: begin
               my_store_data_to_dmem_logic = {rs2_data[7:0], 24'b0}; // prepare byte 3
-              store_we_to_dmem = 4'b1000;
+              my_store_we_to_dmem_logic = 4'b1000;
             end
             default: illegal_insn = 1'b1; // should never happen
           endcase
@@ -629,18 +635,18 @@ module DatapathSingleCycle (
           exact_addr_dmem = rs1_data + imm_s_sext; // calculate address
           
           // prepare store_data_to_dmem & align addr_to_dmem
-          addr_to_dmem = rs1_data + imm_s_sext;
-          addr_to_dmem[1:0] = 2'b00; // align address to 4B boundary
+          my_addr_to_dmem_logic = rs1_data + imm_s_sext;
+          my_addr_to_dmem_logic[1:0] = 2'b00; // align address to 4B boundary
           
           // select half-word & set corresponding byte enable bit
           case (exact_addr_dmem[1:0])
             2'b00: begin
               my_store_data_to_dmem_logic = {16'b0, rs2_data[15:0]}; // lower half-word
-              store_we_to_dmem = 4'b0011; // enable writing
+              my_store_we_to_dmem_logic = 4'b0011; // enable writing
             end
             2'b10: begin
               my_store_data_to_dmem_logic = {rs2_data[15:0], 16'b0}; // upper half-word
-              store_we_to_dmem = 4'b1100; // enable writing
+              my_store_we_to_dmem_logic = 4'b1100; // enable writing
             end
             default: illegal_insn = 1'b1; // should never happen
           endcase
@@ -653,11 +659,11 @@ module DatapathSingleCycle (
             // raise illegal instruction flag
             illegal_insn = 1'b1;
           end else begin
-            addr_to_dmem = rs1_data + imm_s_sext;
+            my_addr_to_dmem_logic = rs1_data + imm_s_sext;
             // store entire word
             my_store_data_to_dmem_logic = rs2_data;
             // enable writing
-            store_we_to_dmem = 4'b1111;
+            my_store_we_to_dmem_logic = 4'b1111;
           end
         end else begin
           illegal_insn = 1'b1;
