@@ -271,11 +271,14 @@ async def testEcall(dut):
     "ecall insn causes processor to halt"
     asm(dut, '''
         lui x1,0x12345
-        ecall''')
+        ecall
+        lui x1,0xABCDE''')
     await preTestSetup(dut)
 
-    await ClockCycles(dut.clock_proc, 2) # check for halt *during* ecall, not afterwards
+    await ClockCycles(dut.clock_proc, 2) # check for halt *during* ecall
     assert dut.datapath.halt.value == 1, f'failed at cycle {dut.datapath.cycles_current.value.integer}'
+    await ClockCycles(dut.clock_proc, 1) # ensure halt goes back down after ecall is done
+    assert dut.datapath.halt.value == 0, f'failed at cycle {dut.datapath.cycles_current.value.integer}'
     pass
 
 @cocotb.test()
@@ -326,7 +329,7 @@ async def dhrystone(dut):
     loadBinaryIntoMemory(dut, dsBinary)
     await preTestSetup(dut)
 
-    dut._log.info(f'Running Dhrystone benchmark...')
+    dut._log.info(f'Running Dhrystone benchmark (takes 193k cycles)...')
     for cycles in range(210_000):
         await RisingEdge(dut.clock_proc)
         if cycles > 0 and 0 == cycles % 10_000:
