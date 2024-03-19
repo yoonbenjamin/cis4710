@@ -12,7 +12,7 @@
 `ifndef RISCV_FORMAL
 `include "../hw2b/cla.sv"
 `include "divider_unsigned_pipelined.sv"
-// `include "../hw3-singlecycle/RvDisassembler.sv"
+`include "../hw3-singlecycle/RvDisassembler.sv"
 `endif
 
 module RegFile (
@@ -172,7 +172,7 @@ module DatapathMultiCycle (
 
   // synthesis translate_off
   // this code is only for simulation, not synthesis
-  `include "RvDisassembler.sv"
+  // `include "RvDisassembler.sv"
   string disasm_string;
   always_comb begin
     disasm_string = rv_disasm(insn_from_imem);
