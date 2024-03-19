@@ -12,7 +12,7 @@
 `ifndef RISCV_FORMAL
 `include "../hw2b/cla.sv"
 `include "divider_unsigned_pipelined.sv"
-`include "../hw3-singlecycle/RvDisassembler.sv"
+// `include "../hw3-singlecycle/RvDisassembler.sv"
 `endif
 
 module RegFile (
