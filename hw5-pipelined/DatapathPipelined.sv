@@ -56,7 +56,23 @@ module RegFile (
   logic [`REG_SIZE] regs[NumRegs];
 
   // TODO: your code here
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      // reset all regs
+      for (int i = 0; i < NumRegs; i++) begin
+        regs[i] <= 0;
+      end
+    end else if (we && rd != 0) begin
+      // write data to rd
+      regs[rd] <= rd_data;
+    end
+  end
 
+  // read data
+  always_comb begin
+    rs1_data = (rs1 == 0) ? 0 : regs[rs1];
+    rs2_data = (rs2 == 0) ? 0 : regs[rs2];
+  end
 endmodule
 
 /**
@@ -96,6 +112,42 @@ typedef struct packed {
   cycle_status_e cycle_status;
 } stage_decode_t;
 
+/** state at the start of Execute stage */
+typedef struct packed {
+  logic [`REG_SIZE] pc;
+  logic [`INSN_SIZE] insn;
+  cycle_status_e cycle_status;
+  logic [`OPCODE_SIZE] insn_opcode;
+  logic [`REG_SIZE] rs1_data;
+  logic [`REG_SIZE] rs2_data;
+  logic [11:0] imm;
+  logic [`REG_SIZE] imm_i_sext;
+  logic [`REG_SIZE] imm_b_sext;
+  logic [`REG_SIZE] imm_j_sext;
+  logic [6:0] insn_funct7;
+  logic [2:0] insn_funct3;
+  logic [4:0] insn_rd;
+} stage_execute_t;
+
+/** state at the start of Memory stage */
+typedef struct packed {
+  logic [`REG_SIZE] pc;
+  logic [`INSN_SIZE] insn;
+  cycle_status_e cycle_status;
+  logic [`REG_SIZE] rd_data;
+  logic [4:0] insn_rd;
+  logic we; 
+} stage_memory_t;
+
+/** state at the start of Writeback stage */
+typedef struct packed {
+  logic [`REG_SIZE] pc;
+  logic [`INSN_SIZE] insn;
+  cycle_status_e cycle_status;
+  logic [`REG_SIZE] rd_data;
+  logic [4:0] insn_rd;
+  logic we; 
+} stage_writeback_t;
 
 module DatapathPipelined (
     input wire clk,
@@ -152,12 +204,19 @@ module DatapathPipelined (
   wire [`REG_SIZE] f_insn;
   cycle_status_e f_cycle_status;
 
+  // signal to indicate flush due to taken branch
+  logic branch_taken;
+  logic [`REG_SIZE] branch_target;
+
   // program counter
   always_ff @(posedge clk) begin
     if (rst) begin
       f_pc_current <= 32'd0;
       // NB: use CYCLE_NO_STALL since this is the value that will persist after the last reset cycle
       f_cycle_status <= CYCLE_NO_STALL;
+    end else if (branch_taken) begin
+      f_pc_current <= branch_target; // set pc
+      f_cycle_status <= CYCLE_TAKEN_BRANCH;
     end else begin
       f_cycle_status <= CYCLE_NO_STALL;
       f_pc_current <= f_pc_current + 4;
@@ -189,6 +248,12 @@ module DatapathPipelined (
         insn: 0,
         cycle_status: CYCLE_RESET
       };
+    end else if (branch_taken) begin
+      decode_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: CYCLE_TAKEN_BRANCH
+      };
     end else begin
       begin
         decode_state <= '{
@@ -208,7 +273,347 @@ module DatapathPipelined (
 
   // TODO: your code here, though you will also need to modify some of the code above
   // TODO: the testbench requires that your register file instance is named `rf`
+  wire [6:0] insn_funct7;
+  wire [4:0] insn_rs2;
+  wire [4:0] insn_rs1;
+  wire [2:0] insn_funct3;
+  wire [4:0] insn_rd;
+  wire [`OPCODE_SIZE] insn_opcode;
 
+  // split R-type instruction - see section 2.2 of RiscV spec
+  assign {insn_funct7, insn_rs2, insn_rs1, insn_funct3, insn_rd, insn_opcode} = decode_state.insn;
+
+  // setup for I, B & J type instructions
+  // I - short immediates and loads
+  wire [11:0] imm_i;
+  assign imm_i = decode_state.insn[31:20];
+  wire [ 4:0] imm_shamt = decode_state.insn[24:20];
+
+  // B - conditionals
+  wire [12:0] imm_b;
+  assign {imm_b[12], imm_b[10:5]} = insn_funct7, {imm_b[4:1], imm_b[11]} = insn_rd, imm_b[0] = 1'b0;
+
+  // J - unconditional jumps
+  wire [20:0] imm_j;
+  assign {imm_j[20], imm_j[10:1], imm_j[11], imm_j[19:12], imm_j[0]} = {decode_state.insn[31:12], 1'b0};
+
+  wire [`REG_SIZE] imm_i_sext = {{20{imm_i[11]}}, imm_i[11:0]};
+  wire [`REG_SIZE] imm_b_sext = {{19{imm_b[12]}}, imm_b[12:0]};
+  wire [`REG_SIZE] imm_j_sext = {{11{imm_j[20]}}, imm_j[20:0]};
+
+  // Declare signals as logic
+  logic [`REG_SIZE] rd_data; // Data to write
+  logic we; // Write enable
+  logic [`REG_SIZE] rs1_data, rs2_data; // Data from source
+  logic [4:0] wb_insn_rd;
+
+  // Instantiate RegFile w/ instance name 'rf'
+  RegFile rf (
+    .rd(wb_insn_rd),
+    .rd_data(rd_data),
+    .rs1(insn_rs1),
+    .rs1_data(rs1_data),
+    .rs2(insn_rs2),
+    .rs2_data(rs2_data),
+    .clk(clk),
+    .we(we),
+    .rst(rst)
+  );
+
+  /*****************/
+  /* EXECUTE STAGE */
+  /*****************/
+
+  // package up state
+  stage_execute_t execute_state;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      execute_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: CYCLE_RESET,
+        insn_opcode: 0,
+        rs1_data: 0,
+        rs2_data: 0,
+        imm: 0,
+        imm_i_sext: 0,
+        imm_b_sext: 0,
+        imm_j_sext: 0,
+        insn_funct7: 0,
+        insn_funct3: 0,
+        insn_rd: 0
+      };
+    end else begin
+      begin
+        execute_state <= '{
+          pc: decode_state.pc,
+          insn: decode_state.insn,
+          cycle_status: decode_state.cycle_status,
+          insn_opcode: insn_opcode,
+          rs1_data: rs1_data,
+          rs2_data: rs2_data,
+          imm: imm_i,
+          imm_i_sext: imm_i_sext,
+          imm_b_sext: imm_b_sext,
+          imm_j_sext: imm_j_sext,
+          insn_funct7: insn_funct7,
+          insn_funct3: insn_funct3,
+          insn_rd: insn_rd
+        };
+      end
+    end
+  end
+
+  logic illegal_insn;
+
+  // Declare signals for CLA adder
+  logic [31:0] a, b, sum;
+  logic cin;
+
+  // Instantiate CLA adder
+  cla adder (
+    .a(a),
+    .b(b),
+    .cin(cin),
+    .sum(sum)
+  );
+
+  // Declare signals as logic
+  logic [`REG_SIZE] e_rd_data; // Data to write
+  logic e_we; // Write enable
+
+  always_comb begin
+    illegal_insn = 1'b0;
+
+    // Default assignments
+    e_we = 1'b0;
+    e_rd_data = 32'b0;
+    a = 32'b0;
+    b = 32'b0;
+    cin = 1'b0;
+    branch_taken = 1'b0;
+    branch_target = execute_state.pc + 4;
+    
+    case (execute_state.insn_opcode)
+      OpcodeLui: begin
+        // TODO: start here by implementing lui
+        e_rd_data = {execute_state.insn[31:12], 12'b0}; // Immediate is in top 20 bits
+        e_we = 1'b1; // Enable writing
+      end
+      OpcodeRegImm: begin
+        if (execute_state.insn_funct3 == 3'b000) begin
+          // ADDI:
+          a = execute_state.rs1_data; // Src reg data
+          b = execute_state.imm_i_sext; // Sign-extended immediate
+          e_rd_data = sum; // Result of addition
+          e_we = 1'b1; // Enable write
+        end else if (execute_state.insn_funct3 == 3'b010) begin
+          // SLTI:
+          e_rd_data = $signed(execute_state.rs1_data) < $signed(execute_state.imm_i_sext) ? 32'd1 : 32'd0;
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b011) begin
+          // SLTIU:
+          e_rd_data = ($unsigned(execute_state.rs1_data) < $unsigned(execute_state.imm_i_sext)) ? 32'd1 : 32'd0;
+          e_we = 1'b1; // Enable writing
+        end else if (execute_state.insn_funct3 == 3'b100) begin
+          // XORI:
+          e_rd_data = execute_state.rs1_data ^ execute_state.imm_i_sext; // Perform bitwise XOR
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b110) begin
+          // ORI:
+          e_rd_data = execute_state.rs1_data | execute_state.imm_i_sext; 
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b111) begin
+          // ANDI:
+          e_rd_data = execute_state.rs1_data & execute_state.imm_i_sext; // Perform bitwise AND
+          e_we = 1'b1; // Enable writing to dest reg
+        end else if (execute_state.insn_funct3 == 3'b001 && execute_state.insn_funct7 == 7'd0) begin
+          // SLLI:
+          e_rd_data = execute_state.rs1_data << execute_state.imm[4:0]; // Shift left logical
+          e_we = 1'b1; // Enable writing to dest reg
+        end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'd0) begin
+          // SRLI:
+          e_rd_data = execute_state.rs1_data >> execute_state.imm[4:0]; // Shift rs1_data right
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'b0100000) begin
+          // SRAI:
+          e_rd_data = $signed(execute_state.rs1_data) >>> execute_state.imm[4:0];
+          e_we = 1'b1; // Enable writing to dest reg
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      OpcodeRegReg: begin // This indicates R-type insn
+        if (execute_state.insn_funct3 == 3'b000 && execute_state.insn_funct7 == 7'd0) begin
+          // ADD:
+          a = execute_state.rs1_data; // Data from src reg 1
+          b = execute_state.rs2_data; // Data from src reg 2
+          cin = 1'b0; // Carry-in for add
+          // result stored in sum
+          e_rd_data = sum;
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b000 && execute_state.insn_funct7 == 7'b0100000) begin
+          // SUB:
+          a = execute_state.rs1_data; // Data from src reg 1
+          b = execute_state.rs2_data; // Data from src reg 2
+          b = ~execute_state.rs2_data; // Invert bits of 2nd operand for sub
+          cin = 1'b1; // Carry-in for sub
+          // result stored in sum
+          e_rd_data = sum;
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b111 && execute_state.insn_funct7 == 7'd0) begin
+          // AND:
+          e_rd_data = execute_state.rs1_data & execute_state.rs2_data; // Perform bitwise AND
+          e_we = 1'b1; // Enable write back to reg
+        end else if (execute_state.insn_funct3 == 3'b001 && execute_state.insn_funct7 == 7'd0) begin
+          // SLL:
+          e_rd_data = execute_state.rs1_data << execute_state.rs2_data[4:0]; // Shift left
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b010 && execute_state.insn_funct7 == 7'd0) begin
+          // SLT:
+          e_rd_data = $signed(execute_state.rs1_data) < $signed(execute_state.rs2_data) ? 32'd1 : 32'd0;
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b011 && execute_state.insn_funct7 == 7'd0) begin
+          // SLTU:
+          e_rd_data = ($unsigned(execute_state.rs1_data) < $unsigned(execute_state.rs2_data)) ? 32'd1 : 32'd0;
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b100 && execute_state.insn_funct7 == 7'd0) begin
+          // XOR:
+          e_rd_data = execute_state.rs1_data ^ execute_state.rs2_data; // Perform bitwise XOR
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'd0) begin
+          // SRL:
+          e_rd_data = execute_state.rs1_data >> execute_state.rs2_data[4:0]; // Logical shift right
+          e_we = 1'b1; // Enable write back to dest reg
+        end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'b0100000) begin
+          // SRA:
+          e_rd_data = $signed(execute_state.rs1_data) >>> execute_state.rs2_data[4:0];
+          e_we = 1'b1;
+        end else if (execute_state.insn_funct3 == 3'b110 && execute_state.insn_funct7 == 7'd0) begin
+          // OR:
+          e_rd_data = execute_state.rs1_data | execute_state.rs2_data;
+          e_we = 1'b1; // Enable write back to dest reg
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+      OpcodeBranch: begin
+        if (execute_state.insn_funct3 == 3'b000) begin
+          // BEQ:
+          if (execute_state.rs1_data == execute_state.rs2_data) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else if (execute_state.insn_funct3 == 3'b111) begin
+          // BGEU:
+          if ($unsigned(execute_state.rs1_data) >= $unsigned(execute_state.rs2_data)) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else if (execute_state.insn_funct3 == 3'b001) begin
+          // BNE:
+          if (execute_state.rs1_data != execute_state.rs2_data) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else if (execute_state.insn_funct3 == 3'b100) begin
+          // BLT:
+          if ($signed(execute_state.rs1_data) < $signed(execute_state.rs2_data)) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else if (execute_state.insn_funct3 == 3'b101) begin
+          // BGE:
+          if ($signed(execute_state.rs1_data) >= $signed(execute_state.rs2_data)) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else if (execute_state.insn_funct3 == 3'b110) begin
+          // BLTU:
+          if ($unsigned(execute_state.rs1_data) < $unsigned(execute_state.rs2_data)) begin
+            branch_target = execute_state.pc + execute_state.imm_b_sext;
+            branch_taken = 1'b1;
+          end
+        end else begin 
+          illegal_insn = 1'b1;
+        end
+      end
+      OpcodeJal: begin
+        // JAL:
+        e_rd_data = execute_state.pc + 4; // save return address
+        branch_target = execute_state.pc + execute_state.imm_j_sext;
+        branch_taken = 1'b1;
+        e_we = 1'b1; // write enable
+      end
+      default: begin
+        illegal_insn = 1'b1;
+      end
+    endcase
+  end
+
+  /*******************/
+  /* MEMORY STAGE */
+  /*******************/
+
+  // package up state
+  stage_memory_t memory_state;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      memory_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: CYCLE_RESET,
+        rd_data: 0,
+        insn_rd: 0,
+        we: 0
+      };
+    end else begin
+      begin
+        memory_state <= '{
+          pc: execute_state.pc,
+          insn: execute_state.insn,
+          cycle_status: execute_state.cycle_status,
+          rd_data: e_rd_data,
+          insn_rd: execute_state.insn_rd,
+          we: e_we
+        };
+      end
+    end
+  end
+
+  /*******************/
+  /* WRITEBACK STAGE */
+  /*******************/
+
+  // package up state
+  stage_writeback_t writeback_state;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      writeback_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: CYCLE_RESET,
+        rd_data: 0,
+        insn_rd: 0,
+        we: 0
+      };
+    end else begin
+      begin
+        writeback_state <= '{
+          pc: memory_state.pc,
+          insn: memory_state.insn,
+          cycle_status: memory_state.cycle_status,
+          rd_data: memory_state.rd_data,
+          insn_rd: memory_state.insn_rd,
+          we: memory_state.we
+        };
+      end
+    end
+  end
+
+  assign wb_insn_rd = writeback_state.insn_rd;
+  assign rd_data = writeback_state.rd_data;
+  assign we = writeback_state.we; // signal triggers actual write
 endmodule
 
 module MemorySingleCycle #(
