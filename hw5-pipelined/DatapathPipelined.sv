@@ -206,10 +206,6 @@ module DatapathPipelined (
   localparam bit [`OPCODE_SIZE] OpcodeAuipc = 7'b00_101_11;
   localparam bit [`OPCODE_SIZE] OpcodeLui = 7'b01_101_11;
 
-  localparam bit [`OPCODE_SIZE] OpcodeNop = 7'b00_000_00;
-  localparam bit [`INSN_SIZE] InstructionNop = 32'b0000000000000000000000000000000;
-
-
   // cycle counter, not really part of any stage but useful for orienting within GtkWave
   // do not rename this as the testbench uses this value
   logic [`REG_SIZE] cycles_current;
@@ -326,15 +322,15 @@ module DatapathPipelined (
   wire [`REG_SIZE] imm_b_sext = {{19{imm_b[12]}}, imm_b[12:0]};
   wire [`REG_SIZE] imm_j_sext = {{11{imm_j[20]}}, imm_j[20:0]};
 
-  // Declare signals as logic
-  logic [`REG_SIZE] rd_data; // Data to write
-  logic we; // Write enable
-  logic [`REG_SIZE] rs1_data, rs2_data; // Data from source
-  logic [4:0] wb_insn_rd;
+  // declare signals logic
+  logic [`REG_SIZE] rd_data;
+  logic we;
+  logic [`REG_SIZE] rs1_data, rs2_data;
+  logic [4:0] w_insn_rd;
 
-  // Instantiate RegFile w/ instance name 'rf'
+  // instantiate regfile 
   RegFile rf (
-    .rd(wb_insn_rd),
+    .rd(w_insn_rd),
     .rd_data(rd_data),
     .rs1(insn_rs1),
     .rs1_data(rs1_data),
@@ -450,11 +446,11 @@ module DatapathPipelined (
 
   logic illegal_insn;
 
-  // Declare signals for CLA adder
+  // declare signals for cla adder
   logic [31:0] a, b, sum;
   logic cin;
 
-  // Instantiate CLA adder
+  // instantiate cla adder
   cla adder (
     .a(a),
     .b(b),
@@ -462,154 +458,153 @@ module DatapathPipelined (
     .sum(sum)
   );
 
-  // Declare signals as logic
-  logic [`REG_SIZE] e_rd_data; // Data to write
-  logic e_we; // Write enable
+  // declare signals logic
+  logic [`REG_SIZE] x_rd_data;
+  logic x_we; // Write enable
 
-  logic [`REG_SIZE] e_rs1_data, e_rs2_data;
+  logic [`REG_SIZE] x_rs1_data, x_rs2_data;
 
   // bypass logic
   always_comb begin
     // default original register data
-    e_rs1_data = execute_state.rs1_data;
-    e_rs2_data = execute_state.rs2_data;
+    x_rs1_data = execute_state.rs1_data;
+    x_rs2_data = execute_state.rs2_data;
 
     // check mx bypass conditions directly
     if (execute_state.u_b_rs1_data) begin
       // wx logic rs1
-      e_rs1_data = execute_state.b_rs1_data;
+      x_rs1_data = execute_state.b_rs1_data;
     end
     if (execute_state.u_b_rs2_data) begin
       // wx logic rs2
-      e_rs2_data = execute_state.b_rs2_data;
+      x_rs2_data = execute_state.b_rs2_data;
     end
     
     if (memory_state.we) begin
       // mx bypass rs1
       if (execute_state.insn_rs1 == memory_state.insn_rd && execute_state.insn_rs1 != 0) begin
-        e_rs1_data = memory_state.rd_data;
+        x_rs1_data = memory_state.rd_data;
       end
       // mx bypass rs2
       if (execute_state.insn_rs2 == memory_state.insn_rd && execute_state.insn_rs2 != 0) begin
-        e_rs2_data = memory_state.rd_data;
+        x_rs2_data = memory_state.rd_data;
       end
     end
   end
 
-  logic e_halt;
+  logic x_halt;
 
   always_comb begin
     illegal_insn = 1'b0;
 
-    // Default assignments
-    e_we = 1'b0;
-    e_rd_data = 32'b0;
+    // default assignments
+    x_we = 1'b0;
+    x_rd_data = 32'b0;
     a = 32'b0;
     b = 32'b0;
     cin = 1'b0;
     branch_taken = 1'b0;
     branch_target = execute_state.pc + 4;
-    e_halt = 1'b0;
+    x_halt = 1'b0;
     
     case (execute_state.insn_opcode)
       OpcodeLui: begin
-        // TODO: start here by implementing lui
-        e_rd_data = {execute_state.insn[31:12], 12'b0}; // Immediate is in top 20 bits
-        e_we = 1'b1; // Enable writing
+        // LUI:
+        x_rd_data = {execute_state.insn[31:12], 12'b0}; 
+        x_we = 1'b1;
       end
       OpcodeRegImm: begin
         if (execute_state.insn_funct3 == 3'b000) begin
           // ADDI:
-          a = e_rs1_data; // Src reg data
-          b = execute_state.imm_i_sext; // Sign-extended immediate
-          e_rd_data = sum; // Result of addition
-          e_we = 1'b1; // Enable write
+          a = x_rs1_data; 
+          b = execute_state.imm_i_sext; 
+          x_rd_data = sum; 
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b010) begin
           // SLTI:
-          e_rd_data = $signed(e_rs1_data) < $signed(execute_state.imm_i_sext) ? 32'd1 : 32'd0;
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = $signed(x_rs1_data) < $signed(execute_state.imm_i_sext) ? 32'd1 : 32'd0;
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b011) begin
           // SLTIU:
-          e_rd_data = ($unsigned(e_rs1_data) < $unsigned(execute_state.imm_i_sext)) ? 32'd1 : 32'd0;
-          e_we = 1'b1; // Enable writing
+          x_rd_data = ($unsigned(x_rs1_data) < $unsigned(execute_state.imm_i_sext)) ? 32'd1 : 32'd0;
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b100) begin
           // XORI:
-          e_rd_data = e_rs1_data ^ execute_state.imm_i_sext; // Perform bitwise XOR
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = x_rs1_data ^ execute_state.imm_i_sext; 
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b110) begin
           // ORI:
-          e_rd_data = e_rs1_data | execute_state.imm_i_sext; 
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = x_rs1_data | execute_state.imm_i_sext; 
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b111) begin
           // ANDI:
-          e_rd_data = e_rs1_data & execute_state.imm_i_sext; // Perform bitwise AND
-          e_we = 1'b1; // Enable writing to dest reg
+          x_rd_data = x_rs1_data & execute_state.imm_i_sext; 
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b001 && execute_state.insn_funct7 == 7'd0) begin
           // SLLI:
-          e_rd_data = e_rs1_data << execute_state.imm[4:0]; // Shift left logical
-          e_we = 1'b1; // Enable writing to dest reg
+          x_rd_data = x_rs1_data << execute_state.imm[4:0]; 
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'd0) begin
           // SRLI:
-          e_rd_data = e_rs1_data >> execute_state.imm[4:0]; // Shift rs1_data right
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = x_rs1_data >> execute_state.imm[4:0];
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'b0100000) begin
           // SRAI:
-          e_rd_data = $signed(e_rs1_data) >>> execute_state.imm[4:0];
-          e_we = 1'b1; // Enable writing to dest reg
+          x_rd_data = $signed(x_rs1_data) >>> execute_state.imm[4:0];
+          x_we = 1'b1; 
         end else begin
           illegal_insn = 1'b1;
         end
       end
-      OpcodeRegReg: begin // This indicates R-type insn
+      OpcodeRegReg: begin 
         if (execute_state.insn_funct3 == 3'b000 && execute_state.insn_funct7 == 7'd0) begin
           // ADD:
-          a = e_rs1_data; // Data from src reg 1
-          b = e_rs2_data; // Data from src reg 2
-          cin = 1'b0; // Carry-in for add
+          a = x_rs1_data; 
+          b = x_rs2_data; 
+          cin = 1'b0; 
           // result stored in sum
-          e_rd_data = sum;
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = sum;
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b000 && execute_state.insn_funct7 == 7'b0100000) begin
           // SUB:
-          a = e_rs1_data; // Data from src reg 1
-          b = e_rs2_data; // Data from src reg 2
-          b = ~e_rs2_data; // Invert bits of 2nd operand for sub
-          cin = 1'b1; // Carry-in for sub
+          a = x_rs1_data; 
+          b = ~x_rs2_data;
+          cin = 1'b1; 
           // result stored in sum
-          e_rd_data = sum;
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = sum;
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b111 && execute_state.insn_funct7 == 7'd0) begin
           // AND:
-          e_rd_data = e_rs1_data & e_rs2_data; // Perform bitwise AND
-          e_we = 1'b1; // Enable write back to reg
+          x_rd_data = x_rs1_data & x_rs2_data; 
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b001 && execute_state.insn_funct7 == 7'd0) begin
           // SLL:
-          e_rd_data = e_rs1_data << e_rs2_data[4:0]; // Shift left
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = x_rs1_data << x_rs2_data[4:0]; 
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b010 && execute_state.insn_funct7 == 7'd0) begin
           // SLT:
-          e_rd_data = $signed(e_rs1_data) < $signed(e_rs2_data) ? 32'd1 : 32'd0;
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = $signed(x_rs1_data) < $signed(x_rs2_data) ? 32'd1 : 32'd0;
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b011 && execute_state.insn_funct7 == 7'd0) begin
           // SLTU:
-          e_rd_data = ($unsigned(e_rs1_data) < $unsigned(e_rs2_data)) ? 32'd1 : 32'd0;
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = ($unsigned(x_rs1_data) < $unsigned(x_rs2_data)) ? 32'd1 : 32'd0;
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b100 && execute_state.insn_funct7 == 7'd0) begin
           // XOR:
-          e_rd_data = e_rs1_data ^ e_rs2_data; // Perform bitwise XOR
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = x_rs1_data ^ x_rs2_data; 
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'd0) begin
           // SRL:
-          e_rd_data = e_rs1_data >> e_rs2_data[4:0]; // Logical shift right
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = x_rs1_data >> x_rs2_data[4:0];
+          x_we = 1'b1; 
         end else if (execute_state.insn_funct3 == 3'b101 && execute_state.insn_funct7 == 7'b0100000) begin
           // SRA:
-          e_rd_data = $signed(e_rs1_data) >>> e_rs2_data[4:0];
-          e_we = 1'b1;
+          x_rd_data = $signed(x_rs1_data) >>> x_rs2_data[4:0];
+          x_we = 1'b1;
         end else if (execute_state.insn_funct3 == 3'b110 && execute_state.insn_funct7 == 7'd0) begin
           // OR:
-          e_rd_data = e_rs1_data | e_rs2_data;
-          e_we = 1'b1; // Enable write back to dest reg
+          x_rd_data = x_rs1_data | x_rs2_data;
+          x_we = 1'b1; 
         end else begin
           illegal_insn = 1'b1;
         end
@@ -617,37 +612,37 @@ module DatapathPipelined (
       OpcodeBranch: begin
         if (execute_state.insn_funct3 == 3'b000) begin
           // BEQ:
-          if (e_rs1_data == e_rs2_data) begin
+          if (x_rs1_data == x_rs2_data) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
         end else if (execute_state.insn_funct3 == 3'b111) begin
           // BGEU:
-          if ($unsigned(e_rs1_data) >= $unsigned(e_rs2_data)) begin
+          if ($unsigned(x_rs1_data) >= $unsigned(x_rs2_data)) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
         end else if (execute_state.insn_funct3 == 3'b001) begin
           // BNE:
-          if (e_rs1_data != e_rs2_data) begin
+          if (x_rs1_data != x_rs2_data) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
         end else if (execute_state.insn_funct3 == 3'b100) begin
           // BLT:
-          if ($signed(e_rs1_data) < $signed(e_rs2_data)) begin
+          if ($signed(x_rs1_data) < $signed(x_rs2_data)) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
         end else if (execute_state.insn_funct3 == 3'b101) begin
           // BGE:
-          if ($signed(e_rs1_data) >= $signed(e_rs2_data)) begin
+          if ($signed(x_rs1_data) >= $signed(x_rs2_data)) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
         end else if (execute_state.insn_funct3 == 3'b110) begin
           // BLTU:
-          if ($unsigned(e_rs1_data) < $unsigned(e_rs2_data)) begin
+          if ($unsigned(x_rs1_data) < $unsigned(x_rs2_data)) begin
             branch_target = execute_state.pc + execute_state.imm_b_sext;
             branch_taken = 1'b1;
           end
@@ -657,17 +652,17 @@ module DatapathPipelined (
       end
       OpcodeEnviron: begin
         if (execute_state.insn[31:7] == 25'd0) begin
-          e_halt = 1'b1;
+          x_halt = 1'b1;
         end else begin
           illegal_insn = 1'b1;
         end
       end
       OpcodeJal: begin
         // JAL:
-        e_rd_data = execute_state.pc + 4; // save return address
+        x_rd_data = execute_state.pc + 4; 
         branch_target = execute_state.pc + execute_state.imm_j_sext;
         branch_taken = 1'b1;
-        e_we = 1'b1; // write enable
+        x_we = 1'b1;
       end
       default: begin
         illegal_insn = 1'b1;
@@ -700,12 +695,12 @@ module DatapathPipelined (
           pc: execute_state.pc,
           insn: execute_state.insn,
           cycle_status: execute_state.cycle_status,
-          rd_data: e_rd_data,
+          rd_data: x_rd_data,
           insn_rd: execute_state.insn_rd,
-          we: e_we,
-          halt: e_halt,
-          tmp_rs1: e_rs1_data,
-          tmp_rs2: e_rs2_data
+          we: x_we,
+          halt: x_halt,
+          tmp_rs1: x_rs1_data,
+          tmp_rs2: x_rs2_data
         };
       end
     end
@@ -743,15 +738,16 @@ module DatapathPipelined (
     end
   end
 
-  assign wb_insn_rd = writeback_state.insn_rd;
+  assign w_insn_rd = writeback_state.insn_rd;
   assign rd_data = writeback_state.rd_data;
   assign we = writeback_state.we; // signal triggers actual write
   assign halt = writeback_state.halt;
-  // The PC of the insn currently in Writeback. 0 if not a valid insn.
+
+  // pc insn currently writeback 0 if not valid insn
   assign trace_writeback_pc = writeback_state.pc;
-  // The bits of the insn currently in Writeback. 0 if not a valid insn.
+  // bits insn currently writeback 0 if not valid insn
   assign trace_writeback_insn = writeback_state.insn;
-  // The status of the insn (or stall) currently in Writeback. See cycle_status_e enum for valid values.
+  // status of insn currently writeback
   assign trace_writeback_cycle_status = writeback_state.cycle_status;
 endmodule
 
