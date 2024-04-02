@@ -71,14 +71,14 @@ module RegFile (
   // reading data and implementing wd bypass
   always_comb begin
     // wd bypass rs1
-    if (we && rd == rs1) begin
+    if (we && rd == rs1 && rs1 != 0) begin
       rs1_data = rd_data;
     end else begin
       rs1_data = (rs1 == 0) ? 0 : regs[rs1];
     end
 
     // wd bypass rs2
-    if (we && rd == rs2) begin
+    if (we && rd == rs2 && rs2 != 0) begin
       rs2_data = rd_data;
     end else begin
       rs2_data = (rs2 == 0) ? 0 : regs[rs2];
@@ -154,6 +154,9 @@ typedef struct packed {
   logic [`REG_SIZE] rd_data;
   logic [4:0] insn_rd;
   logic we; 
+  logic halt;
+  logic [`REG_SIZE] tmp_rs1;
+  logic [`REG_SIZE] tmp_rs2;
 } stage_memory_t;
 
 /** state at the start of Writeback stage */
@@ -164,6 +167,7 @@ typedef struct packed {
   logic [`REG_SIZE] rd_data;
   logic [4:0] insn_rd;
   logic we; 
+  logic halt;
 } stage_writeback_t;
 
 module DatapathPipelined (
@@ -202,6 +206,10 @@ module DatapathPipelined (
   localparam bit [`OPCODE_SIZE] OpcodeAuipc = 7'b00_101_11;
   localparam bit [`OPCODE_SIZE] OpcodeLui = 7'b01_101_11;
 
+  localparam bit [`OPCODE_SIZE] OpcodeNop = 7'b00_000_00;
+  localparam bit [`INSN_SIZE] InstructionNop = 32'b0000000000000000000000000000000;
+
+
   // cycle counter, not really part of any stage but useful for orienting within GtkWave
   // do not rename this as the testbench uses this value
   logic [`REG_SIZE] cycles_current;
@@ -233,7 +241,7 @@ module DatapathPipelined (
       f_cycle_status <= CYCLE_NO_STALL;
     end else if (branch_taken) begin
       f_pc_current <= branch_target; // set pc
-      f_cycle_status <= CYCLE_TAKEN_BRANCH;
+      f_cycle_status <= CYCLE_NO_STALL;
     end else begin
       f_cycle_status <= CYCLE_NO_STALL;
       f_pc_current <= f_pc_current + 4;
@@ -351,11 +359,11 @@ module DatapathPipelined (
 
     // wx bypass logic
     if (memory_state.we) begin
-      if (insn_rs1 == memory_state.insn_rd) begin
+      if (insn_rs1 == memory_state.insn_rd && insn_rs1 != 0) begin
         d_b_rs1_data = memory_state.rd_data;
         d_u_b_rs1_data = 1;
       end
-      if (insn_rs2 == memory_state.insn_rd) begin
+      if (insn_rs2 == memory_state.insn_rd && insn_rs2 != 0) begin
         d_b_rs2_data = memory_state.rd_data;
         d_u_b_rs2_data = 1;
       end
@@ -374,6 +382,28 @@ module DatapathPipelined (
         pc: 0,
         insn: 0,
         cycle_status: CYCLE_RESET,
+        insn_opcode: 0,
+        insn_rs1: 0,
+        insn_rs2: 0,
+        rs1_data: 0,
+        rs2_data: 0,
+        imm: 0,
+        imm_i_sext: 0,
+        imm_b_sext: 0,
+        imm_j_sext: 0,
+        insn_funct7: 0,
+        insn_funct3: 0,
+        insn_rd: 0,
+        b_rs1_data: 0,
+        b_rs2_data: 0,
+        u_b_rs1_data: 0,
+        u_b_rs2_data: 0
+      };
+    end else if (branch_taken) begin
+      execute_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: CYCLE_TAKEN_BRANCH,
         insn_opcode: 0,
         insn_rs1: 0,
         insn_rs2: 0,
@@ -445,25 +475,28 @@ module DatapathPipelined (
     e_rs2_data = execute_state.rs2_data;
 
     // check mx bypass conditions directly
-    if (memory_state.we) begin
-      // mx bypass rs1
-      if (execute_state.insn_rs1 == memory_state.insn_rd) begin
-        e_rs1_data = memory_state.rd_data;
-      end
-      // mx bypass rs2
-      if (execute_state.insn_rs2 == memory_state.insn_rd) begin
-        e_rs2_data = memory_state.rd_data;
-      end
-    end
-
-    // wx logic
     if (execute_state.u_b_rs1_data) begin
+      // wx logic rs1
       e_rs1_data = execute_state.b_rs1_data;
     end
     if (execute_state.u_b_rs2_data) begin
+      // wx logic rs2
       e_rs2_data = execute_state.b_rs2_data;
     end
+    
+    if (memory_state.we) begin
+      // mx bypass rs1
+      if (execute_state.insn_rs1 == memory_state.insn_rd && execute_state.insn_rs1 != 0) begin
+        e_rs1_data = memory_state.rd_data;
+      end
+      // mx bypass rs2
+      if (execute_state.insn_rs2 == memory_state.insn_rd && execute_state.insn_rs2 != 0) begin
+        e_rs2_data = memory_state.rd_data;
+      end
+    end
   end
+
+  logic e_halt;
 
   always_comb begin
     illegal_insn = 1'b0;
@@ -476,6 +509,7 @@ module DatapathPipelined (
     cin = 1'b0;
     branch_taken = 1'b0;
     branch_target = execute_state.pc + 4;
+    e_halt = 1'b0;
     
     case (execute_state.insn_opcode)
       OpcodeLui: begin
@@ -621,6 +655,13 @@ module DatapathPipelined (
           illegal_insn = 1'b1;
         end
       end
+      OpcodeEnviron: begin
+        if (execute_state.insn[31:7] == 25'd0) begin
+          e_halt = 1'b1;
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
       OpcodeJal: begin
         // JAL:
         e_rd_data = execute_state.pc + 4; // save return address
@@ -648,7 +689,10 @@ module DatapathPipelined (
         cycle_status: CYCLE_RESET,
         rd_data: 0,
         insn_rd: 0,
-        we: 0
+        we: 0,
+        halt: 0,
+        tmp_rs1: 0,
+        tmp_rs2: 0
       };
     end else begin
       begin
@@ -658,7 +702,10 @@ module DatapathPipelined (
           cycle_status: execute_state.cycle_status,
           rd_data: e_rd_data,
           insn_rd: execute_state.insn_rd,
-          we: e_we
+          we: e_we,
+          halt: e_halt,
+          tmp_rs1: e_rs1_data,
+          tmp_rs2: e_rs2_data
         };
       end
     end
@@ -678,7 +725,8 @@ module DatapathPipelined (
         cycle_status: CYCLE_RESET,
         rd_data: 0,
         insn_rd: 0,
-        we: 0
+        we: 0,
+        halt: 0
       };
     end else begin
       begin
@@ -688,7 +736,8 @@ module DatapathPipelined (
           cycle_status: memory_state.cycle_status,
           rd_data: memory_state.rd_data,
           insn_rd: memory_state.insn_rd,
-          we: memory_state.we
+          we: memory_state.we,
+          halt: memory_state.halt
         };
       end
     end
@@ -697,6 +746,13 @@ module DatapathPipelined (
   assign wb_insn_rd = writeback_state.insn_rd;
   assign rd_data = writeback_state.rd_data;
   assign we = writeback_state.we; // signal triggers actual write
+  assign halt = writeback_state.halt;
+  // The PC of the insn currently in Writeback. 0 if not a valid insn.
+  assign trace_writeback_pc = writeback_state.pc;
+  // The bits of the insn currently in Writeback. 0 if not a valid insn.
+  assign trace_writeback_insn = writeback_state.insn;
+  // The status of the insn (or stall) currently in Writeback. See cycle_status_e enum for valid values.
+  assign trace_writeback_cycle_status = writeback_state.cycle_status;
 endmodule
 
 module MemorySingleCycle #(
