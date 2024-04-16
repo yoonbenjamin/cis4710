@@ -62,7 +62,7 @@ module divider_unsigned_pipelined (
     endgenerate
 
     // assign outputs
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             out_remainder <= 0;
             out_quotient <= 0;
