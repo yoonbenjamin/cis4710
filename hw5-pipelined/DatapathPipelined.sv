@@ -200,7 +200,7 @@ module DatapathPipelined (
   localparam bit [`OPCODE_SIZE] OpcodeLoad = 7'b00_000_11;
   localparam bit [`OPCODE_SIZE] OpcodeStore = 7'b01_000_11;
   localparam bit [`OPCODE_SIZE] OpcodeBranch = 7'b11_000_11;
-  // localparam bit [`OPCODE_SIZE] OpcodeJalr = 7'b11_001_11;
+  localparam bit [`OPCODE_SIZE] OpcodeJalr = 7'b11_001_11;
   localparam bit [`OPCODE_SIZE] OpcodeMiscMem = 7'b00_011_11;
   localparam bit [`OPCODE_SIZE] OpcodeJal = 7'b11_011_11;
 
@@ -828,6 +828,13 @@ module DatapathPipelined (
         branch_target = execute_state.pc + execute_state.imm_j_sext;
         branch_taken = 1'b1;
         x_we = 1'b1;
+      end
+      OpcodeJalr: begin
+        // JALR:
+        x_we = 1;
+        branch_taken = 1'b1;
+        branch_target = (x_rs1_data + execute_state.imm_i_sext) & ~32'd1;
+        x_rd_data = execute_state.pc + 4;
       end
       OpcodeAuipc: begin
         // AUIPC:
