@@ -130,6 +130,16 @@ module MemoryAxiLite #(
     assert (insn.ARPROT == 3'd0);
     assert (data.ARPROT == 3'd0);
     assert (data.AWPROT == 3'd0);
+    // Ensure that addresses do not exceed the addressable range defined by ADDR_WIDTH
+    if (insn.ARVALID) begin
+      assert((insn.ARADDR & ((1 << ADDR_WIDTH) - 1)) == insn.ARADDR);
+    end
+    if (data.ARVALID) begin
+      assert((data.ARADDR & ((1 << ADDR_WIDTH) - 1)) == data.ARADDR);
+    end
+    if (data.AWVALID) begin
+      assert((data.AWADDR & ((1 << ADDR_WIDTH) - 1)) == data.AWADDR);
+    end
   end
 `endif
 
@@ -137,14 +147,52 @@ module MemoryAxiLite #(
 
   always_ff @(posedge axi.ACLK) begin
     if (!axi.ARESETn) begin
-      // start out ready to accept incoming reads
+      // Reset logic
       insn.ARREADY <= 1;
       data.ARREADY <= 1;
-      // start out ready to accept an incoming write
       data.AWREADY <= 1;
       data.WREADY <= 1;
+      insn.RVALID <= 0;
+      data.RVALID <= 0;
+      data.BVALID <= 0;
     end else begin
+      // Instruction read logic
+      if (insn.ARVALID && insn.ARREADY) begin
+        insn.ARREADY <= 0;
+        insn.RDATA <= mem_array[insn.ARADDR[AddrMsb:AddrLsb]]; 
+        insn.RRESP <= ResponseOkay;
+        insn.RVALID <= 1;
+      end 
+      if (insn.RREADY && insn.RVALID) begin
+        insn.RVALID <= 0;
+        insn.ARREADY <= 1;
+      end
 
+      // Data read logic
+      if (data.ARVALID && data.ARREADY) begin
+        data.ARREADY <= 0;
+        data.RDATA <= mem_array[data.ARADDR[AddrMsb:AddrLsb]];
+        data.RRESP <= ResponseOkay;
+        data.RVALID <= 1;
+      end
+      if (data.RREADY && data.RVALID) begin
+        data.RVALID <= 0;
+        data.ARREADY <= 1;
+      end
+
+      // Data write logic
+      if (data.AWVALID && data.AWREADY && data.WVALID && data.WREADY) begin
+        data.AWREADY <= 0;
+        data.WREADY <= 0;
+        mem_array[data.AWADDR[AddrMsb:AddrLsb]] <= data.WDATA;
+        data.BRESP <= ResponseOkay;
+        data.BVALID <= 1;
+      end
+      if (data.BREADY && data.BVALID) begin
+        data.BVALID <= 0;
+        data.AWREADY <= 1;
+        data.WREADY <= 1;
+      end 
     end
   end
 
