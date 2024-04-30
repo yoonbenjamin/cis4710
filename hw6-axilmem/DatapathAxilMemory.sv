@@ -145,54 +145,69 @@ module MemoryAxiLite #(
 
   // TODO: changes will be needed throughout this module
 
-  always_ff @(posedge axi.ACLK) begin
+  // Assume always ready for simplicity based on system assumptions
+  assign insn.ARREADY = 1'b1;
+  assign data.ARREADY = 1'b1;
+  assign data.AWREADY = 1'b1;
+  assign data.WREADY = 1'b1;
+
+  always_ff @(posedge axi.ACLK or negedge axi.ARESETn) begin
     if (!axi.ARESETn) begin
       // Reset logic
-      insn.ARREADY <= 1;
-      data.ARREADY <= 1;
-      data.AWREADY <= 1;
-      data.WREADY <= 1;
-      insn.RVALID <= 0;
-      data.RVALID <= 0;
-      data.BVALID <= 0;
+      // insn.ARREADY <= 1'b1;
+      // data.ARREADY <= 1'b1;
+      // data.AWREADY <= 1'b1;
+      // data.WREADY <= 1'b1;
+      insn.RVALID <= 1'b0;
+      data.RVALID <= 1'b0;
+      data.BVALID <= 1'b0;
     end else begin
       // Instruction read logic
       if (insn.ARVALID && insn.ARREADY) begin
-        insn.ARREADY <= 0;
-        insn.RDATA <= mem_array[insn.ARADDR[AddrMsb:AddrLsb]]; 
+        insn.RDATA <= mem_array[insn.ARADDR[AddrMsb:AddrLsb]];
         insn.RRESP <= ResponseOkay;
-        insn.RVALID <= 1;
-      end 
-      if (insn.RREADY && insn.RVALID) begin
-        insn.RVALID <= 0;
-        insn.ARREADY <= 1;
-      end
+        insn.RVALID <= 1'b1;
+        // insn.ARREADY <= 1'b0; // Block ARREADY to handle back-to-back reads
+      end else if (insn.RREADY && insn.RVALID) begin
+        insn.RVALID <= 1'b0;
+        // insn.ARREADY <= 1'b1; // Re-enable ARREADY after read completion
+      end // else if (!insn.ARVALID) begin
+        // insn.ARREADY <= 1'b1; // Always ready for new instruction read
+      // end
 
       // Data read logic
       if (data.ARVALID && data.ARREADY) begin
-        data.ARREADY <= 0;
         data.RDATA <= mem_array[data.ARADDR[AddrMsb:AddrLsb]];
         data.RRESP <= ResponseOkay;
-        data.RVALID <= 1;
-      end
-      if (data.RREADY && data.RVALID) begin
-        data.RVALID <= 0;
-        data.ARREADY <= 1;
+        data.RVALID <= 1'b1;
+        // data.ARREADY <= 1'b0; // Block ARREADY to handle back-to-back reads
+      end else if (data.RREADY && data.RVALID) begin
+        data.RVALID <= 1'b0;
+        // data.ARREADY <= 1'b1; // Re-enable ARREADY after read completion
+      end else if (!data.ARVALID) begin
+        // data.ARREADY <= 1'b1; // Always ready for new data read
       end
 
-      // Data write logic
-      if (data.AWVALID && data.AWREADY && data.WVALID && data.WREADY) begin
-        data.AWREADY <= 0;
-        data.WREADY <= 0;
+      // Data write address logic
+      // if (data.AWVALID && data.AWREADY) begin
+        // Accept and latch address, but do not perform the write yet
+        // data.AWREADY <= 1'b0; // Block new write address
+      // end else if (!data.WVALID) begin
+        // data.AWREADY <= 1'b1; // Re-enable AWREADY after write data is not valid
+      // end
+
+      // Data write data logic
+      if (data.WVALID && data.WREADY) begin
+        // Perform the write
         mem_array[data.AWADDR[AddrMsb:AddrLsb]] <= data.WDATA;
+        // data.WREADY <= 1'b0; // Block new write data
         data.BRESP <= ResponseOkay;
-        data.BVALID <= 1;
+        data.BVALID <= 1'b1; // Write response is valid now
+      end else if (data.BREADY && data.BVALID) begin
+        data.BVALID <= 1'b0;
+        // data.WREADY <= 1'b1; // Re-enable WREADY after write completion
+        // data.AWREADY <= 1'b1; // Re-enable AWREADY to accept new write address
       end
-      if (data.BREADY && data.BVALID) begin
-        data.BVALID <= 0;
-        data.AWREADY <= 1;
-        data.WREADY <= 1;
-      end 
     end
   end
 
