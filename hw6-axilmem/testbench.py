@@ -278,6 +278,7 @@ async def testLoadUse1(dut):
     await preTestSetup(dut)
 
     await ClockCycles(dut.clk, 8)
+    print(dut.datapath.rf.regs[1].value)
     assert dut.datapath.rf.regs[2].value == 0x0000_2083, f'failed at cycle {dut.datapath.cycles_current.value.integer}'
     pass
 

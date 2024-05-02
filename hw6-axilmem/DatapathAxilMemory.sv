@@ -385,6 +385,14 @@ typedef struct packed {
   logic [`REG_SIZE] rd_data;
   logic we;
   logic halt;
+  logic [`REG_SIZE] my_araddr_logic;
+  logic [`REG_SIZE] my_awaddr_logic;
+  logic load;
+  logic store;
+  logic div;
+  logic [2:0] load_type;
+  logic [2:0] store_type;
+  logic [`REG_SIZE] rs2_data;
 } stage_writeback_t;
 
 module DatapathAxilMemory (
@@ -507,19 +515,28 @@ module DatapathAxilMemory (
   /****************/
   wire [`REG_SIZE] d_insn;
 
-  // signal to indicate stalling
+  // Signals to indicate stalls
   logic d_taken_branch;
+  logic d_load2use;
+  logic [`REG_SIZE] d_prev_insn;
+  logic fence;
+  logic d_div2use;
 
   // this shows how to package up state in a `struct packed`, and how to pass it between stages
   stage_decode_t decode_state;
   always_ff @(posedge clk) begin
     d_taken_branch <= 1'b0;
+    d_load2use <= 1'b0;
+    d_prev_insn <= d_insn;
+    fence <= 1'b0;
+    d_div2use <= 1'b0;
     if (rst) begin
       decode_state <= '{
         pc: 0,
         insn: 0,
         cycle_status: CYCLE_RESET
       };
+      d_prev_insn <= 0;
     end else if (taken_branch) begin
       decode_state <= '{
         pc: 0,
@@ -527,9 +544,16 @@ module DatapathAxilMemory (
         cycle_status: CYCLE_TAKEN_BRANCH
       };
       d_taken_branch <= 1'b1;
-    end else if (load2use || div2use || fencei) begin
+    end else if (load2use || div2use) begin
       // maintain current state
       decode_state <= decode_state;
+      d_load2use <= 1'b1;
+    end else if (fencei) begin
+      decode_state <= decode_state;
+      fence <= 1'b1;
+    end else if (div2use) begin
+      decode_state <= decode_state;
+      d_div2use <= 1'b1;
     end else begin
         begin
           decode_state <= '{
@@ -541,7 +565,7 @@ module DatapathAxilMemory (
     end
   end
 
-  assign d_insn = d_taken_branch ? 0 : imem.RDATA;
+  assign d_insn = d_taken_branch ? 0 : (d_load2use ? d_prev_insn : (fence ? d_prev_insn : (d_div2use ? d_prev_insn : imem.RDATA)));
 
   wire [255:0] d_disasm;
   Disasm #(
@@ -822,7 +846,7 @@ module DatapathAxilMemory (
     // check wx bypass conditions directly rs1
     end else if (execute_state.insn_rs1 == writeback_state.insn_rd && execute_state.insn_rs1 != 0 && 
         writeback_state.insn_opcode != OpcodeBranch && writeback_state.insn_opcode != OpcodeStore) begin
-      x_rs1_data = writeback_state.rd_data;
+      x_rs1_data = rd_data;
     end else begin
       x_rs1_data = execute_state.rs1_data;
     end
@@ -834,7 +858,7 @@ module DatapathAxilMemory (
     // check wx bypass conditions directly rs2
     end else if (execute_state.insn_rs2 == writeback_state.insn_rd && execute_state.insn_rs2 != 0 &&
         writeback_state.insn_opcode != OpcodeBranch && writeback_state.insn_opcode != OpcodeStore) begin
-      x_rs2_data = writeback_state.rd_data;
+      x_rs2_data = rd_data;
     end else begin
       x_rs2_data = execute_state.rs2_data;
     end
@@ -878,7 +902,7 @@ module DatapathAxilMemory (
   );
 
   // declare signals logic
-  logic [`REG_SIZE] x_rd_data, x_addr_to_dmem_logic;
+  logic [`REG_SIZE] x_rd_data, x_addr_to_dmem_logic, x_w_addr;
   logic x_we, x_halt, load, store, div;
   logic [2:0] load_type, store_type, div_type;
 
@@ -899,6 +923,7 @@ module DatapathAxilMemory (
     load_type = 3'b000;
     store_type = 3'b000;
     div_type = 3'b000;
+    x_w_addr = 0;
 
     case (execute_state.insn_opcode)
       OpcodeLui: begin
@@ -1127,7 +1152,7 @@ module DatapathAxilMemory (
         end
       end
       OpcodeStore: begin
-        x_addr_to_dmem_logic = x_rs1_data + execute_state.imm_s_sext;
+        x_w_addr = x_rs1_data + execute_state.imm_s_sext;
         store = 1'b1;
         if (insn_sb) begin
           // SB:
@@ -1151,6 +1176,8 @@ module DatapathAxilMemory (
   /****************/
   /* MEMORY STAGE */
   /****************/
+  logic [`REG_SIZE] m_addr_to_dmem;
+  logic [`REG_SIZE] w_addr;
 
   // package up state
   stage_memory_t memory_state;
@@ -1177,6 +1204,8 @@ module DatapathAxilMemory (
         store_type: 0,
         div_type: 0
       };
+      m_addr_to_dmem <= 0;
+      w_addr <= 0;
     end else begin
       begin
         memory_state <= '{
@@ -1201,19 +1230,34 @@ module DatapathAxilMemory (
           div_type: div_type
         };
       end
+      m_addr_to_dmem <= x_addr_to_dmem_logic;
+      w_addr <= x_w_addr;
     end
   end
 
+  // Setup AXI read address channel
+  assign dmem.ARADDR = m_addr_to_dmem & ~32'b11;
+  assign dmem.ARPROT = 3'b00;
+  assign dmem.ARVALID = memory_state.load ? 1 : 0;
+
+  // Ready signals to accept the data
+  assign dmem.RREADY = 1'b1;  // Always ready to accept data
+  assign dmem.BREADY = 1'b1;  // Always ready to accept data
+
+  // Setup AXI write address channel
+  assign dmem.AWADDR = w_addr & ~32'b11;
+  assign dmem.AWPROT = 3'b00;
+  assign dmem.WVALID = memory_state.store ? 1'b1 : 0;
+
   logic [`REG_SIZE] m_rd_data;
-  logic [31:0] m_load_data_from_dmem_logic, m_rs2_data;
-  logic [1:0] addr_allign;
+  logic [31:0] m_rs2_data;
 
   // bypass logic
   always_comb begin
     // wm bypass rs2
     if (memory_state.insn_rs2 == writeback_state.insn_rd && memory_state.insn_rs2 != 0 && 
       writeback_state.insn_opcode != OpcodeBranch && writeback_state.insn_opcode != OpcodeStore) begin
-      m_rs2_data = writeback_state.rd_data;
+      m_rs2_data = rd_data;
     // default to original register data
     end else begin
       m_rs2_data = memory_state.rs2_data;
@@ -1221,17 +1265,42 @@ module DatapathAxilMemory (
   end
 
   always_comb begin
-    // addr_to_dmem = 32'b0;
-    // store_data_to_dmem = 32'b0;
-    // store_we_to_dmem = 4'b0000;
     m_rd_data = memory_state.rd_data;
-    m_load_data_from_dmem_logic = 32'b0;
-    addr_allign = 2'b0;
+    
+    if (memory_state.div) begin
+      if (memory_state.div_type == 3'b001) begin
+        if (memory_state.rs2_data == 0) begin
+          m_rd_data = -1;
+        end else begin
+          m_rd_data = (memory_state.rs1_data[31] != memory_state.rs2_data[31]) ? ~o_quotient + 1 : o_quotient;
+        end
+      end else if (memory_state.div_type == 3'b010) begin
+        if (memory_state.rs2_data == 0) begin
+          m_rd_data = -1;
+        end else begin
+          m_rd_data = o_quotient;
+        end
+      end else if (memory_state.div_type == 3'b011) begin
+        if (memory_state.rs2_data == 0) begin
+          m_rd_data = memory_state.rs1_data;
+        end else begin
+          m_rd_data = memory_state.rs1_data[31] ? ~o_remainder + 1 : o_remainder;
+        end
+      end else if (memory_state.div_type == 3'b100) begin
+        if (memory_state.rs2_data == 0) begin
+          m_rd_data = memory_state.rs1_data;
+        end else begin
+          m_rd_data = o_remainder;
+        end
+      end
+    end
   end
 
   /*******************/
   /* WRITEBACK STAGE */
   /*******************/
+  wire [`REG_SIZE] w_load_data_from_dmem;
+  logic [`REG_SIZE] w_rs2_data;
 
   // package up state
   stage_writeback_t writeback_state;
@@ -1245,8 +1314,17 @@ module DatapathAxilMemory (
         insn_rd: 0,
         rd_data: 0,
         we: 0,
-        halt: 0
+        halt: 0,
+        my_araddr_logic: 0,
+        my_awaddr_logic: 0,
+        load: 0,
+        store: 0,
+        div: 0,
+        load_type: 0,
+        store_type: 0,
+        rs2_data: 0
       };
+      w_rs2_data <= 0;
     end else begin
       begin
         writeback_state <= '{
@@ -1257,17 +1335,62 @@ module DatapathAxilMemory (
           insn_rd: memory_state.insn_rd,
           rd_data: m_rd_data,
           we: memory_state.we,
-          halt: memory_state.halt
+          halt: memory_state.halt,
+          my_araddr_logic: dmem.ARADDR,
+          my_awaddr_logic: dmem.AWADDR,
+          load: memory_state.load,
+          store: memory_state.store,
+          div: memory_state.div,
+          load_type: memory_state.load_type,
+          store_type: memory_state.store_type,
+          rs2_data: m_rs2_data
         };
       end
+      w_rs2_data <= m_rs2_data;
     end
   end
+
+  assign w_load_data_from_dmem = writeback_state.load ? dmem.RDATA : 0;
+
+  logic [31:0] w_load_data_from_dmem_logic;
+  logic [1:0] addr_allign;
 
   always_comb begin
     w_insn_rd = writeback_state.insn_rd;
     rd_data = writeback_state.rd_data;
     we = writeback_state.we;
     halt = writeback_state.halt;
+    w_load_data_from_dmem_logic = 32'b0;
+    addr_allign = 2'b0;
+    dmem.WSTRB = 0;
+    dmem.WDATA = 0;
+
+    if (writeback_state.load) begin
+      w_load_data_from_dmem_logic = 32'(w_load_data_from_dmem >> (writeback_state.my_araddr_logic[1:0] * 8));
+      if (writeback_state.load_type == 3'b001) begin
+        rd_data = {{24{w_load_data_from_dmem_logic[7]}}, w_load_data_from_dmem_logic[7:0]};
+      end else if (writeback_state.load_type == 3'b010) begin
+        rd_data = {{16{w_load_data_from_dmem_logic[15]}}, w_load_data_from_dmem_logic[15:0]};
+      end else if (writeback_state.load_type == 3'b011) begin
+        rd_data = w_load_data_from_dmem_logic;
+      end else if (writeback_state.load_type == 3'b100) begin
+        rd_data = {24'b0, w_load_data_from_dmem_logic[7:0]};
+      end else if (writeback_state.load_type == 3'b101) begin
+        rd_data = {16'b0, w_load_data_from_dmem_logic[15:0]};
+      end
+    end else if (writeback_state.store) begin
+      addr_allign = writeback_state.my_awaddr_logic[1:0];
+      if (writeback_state.store_type == 3'b001) begin
+        dmem.WSTRB = 4'b0001 << addr_allign;
+        dmem.WDATA = w_rs2_data << (addr_allign * 8);
+      end else if (writeback_state.store_type == 3'b010) begin
+        dmem.WSTRB = 4'b0011 << addr_allign;
+        dmem.WDATA = w_rs2_data << (addr_allign * 8);
+      end else if (writeback_state.store_type == 3'b011) begin
+        dmem.WSTRB = 4'b1111 << addr_allign;
+        dmem.WDATA = w_rs2_data << (addr_allign * 8);
+      end
+    end
 
     // pc insn currently writeback 0 if not valid insn
     trace_writeback_pc = writeback_state.pc;
